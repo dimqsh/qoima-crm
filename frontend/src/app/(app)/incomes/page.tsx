@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Topbar } from "@/components/app-shell/topbar";
@@ -45,6 +46,7 @@ import {
   AlertTriangle,
   X,
   Wallet as WalletIcon,
+  FolderKanban,
 } from "lucide-react";
 
 function colorFor(t: string) {
@@ -651,6 +653,8 @@ function IncomeRow({
       qc.invalidateQueries({ queryKey: ["wallets"] });
       qc.invalidateQueries({ queryKey: ["wallets-logs"] });
       qc.invalidateQueries({ queryKey: ["wallets-analytics"] });
+      qc.invalidateQueries({ queryKey: ["deal"] });
+      qc.invalidateQueries({ queryKey: ["deals"] });
       toast.success("Запись удалена.");
     },
     onError: (err) => toast.error(asApiError(err).message),
@@ -665,6 +669,16 @@ function IncomeRow({
       </TD>
       <TD className="py-2">
         <div className="text-ink leading-snug">{s.name}</div>
+        {s.deal && (
+          <Link
+            href={`/deals/${s.deal}`}
+            className="mt-0.5 inline-flex items-center gap-1 text-[12px] text-accent hover:underline"
+            title="Платёж записан в проекте"
+          >
+            <FolderKanban className="h-3 w-3" />
+            {s.deal_name}
+          </Link>
+        )}
         {s.note && (
           <div
             className="text-[12px] text-ink-3 leading-snug mt-0.5 line-clamp-2 max-w-[48ch]"
@@ -733,7 +747,10 @@ function IncomeRow({
           <button
             title="Удалить"
             onClick={() => {
-              if (confirm(`Удалить «${s.name}»?`)) del.mutate();
+              const msg = s.deal
+                ? `Удалить «${s.name}»? Платёж в проекте «${s.deal_name}» тоже удалится.`
+                : `Удалить «${s.name}»?`;
+              if (confirm(msg)) del.mutate();
             }}
             disabled={del.isPending}
             className="h-7 w-7 grid place-items-center rounded text-ink-3 hover:text-danger hover:bg-tag-red-bg/30 transition-colors"

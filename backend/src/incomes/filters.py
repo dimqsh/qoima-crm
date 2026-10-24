@@ -20,5 +20,8 @@ class IncomeFilter(filters.FilterSet):
             return queryset
 
         return queryset.filter(
-            Q(name__icontains=value) | Q(type__icontains=value) | Q(note__icontains=value)
+            Q(name__icontains=value)
+            | Q(type__icontains=value)
+            | Q(note__icontains=value)
+            | Q(deal_payment__deal__name__icontains=value)
         )

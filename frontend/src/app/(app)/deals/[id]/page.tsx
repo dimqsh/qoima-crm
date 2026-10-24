@@ -50,6 +50,7 @@ import {
   ArrowLeft,
   FileText,
   Download,
+  Check,
   CheckCircle2,
   Clock,
   Plus,
@@ -121,21 +122,53 @@ export default function DealDetailPage({
 
   const [tab, setTab] = useState<Tab>("overview");
 
-  // Payments are session-local (no GET endpoint yet) — but the
-  // "Record payment" action lives in two places (header + Payments tab), so
-  // we lift state up so both can mutate the same list.
-  const [sessionPayments, setSessionPayments] = useState<DealPayment[]>([]);
+  // The "Record payment" action lives in two places (header + Payments tab),
+  // so the dialog state is lifted up here.
   const [payDialogOpen, setPayDialogOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const qc = useQueryClient();
+
+  // A received payment is also an income, so money views refresh too.
+  function invalidatePayments() {
+    qc.invalidateQueries({ queryKey: ["deal", dealId] });
+    qc.invalidateQueries({ queryKey: ["deals"] });
+    qc.invalidateQueries({ queryKey: ["incomes"] });
+    qc.invalidateQueries({ queryKey: ["incomes-analytics"] });
+    qc.invalidateQueries({ queryKey: ["wallets"] });
+    qc.invalidateQueries({ queryKey: ["wallets-current"] });
+    qc.invalidateQueries({ queryKey: ["wallets-logs"] });
+    qc.invalidateQueries({ queryKey: ["wallets-analytics"] });
+  }
+
   const addPayment = useMutation({
     mutationFn: (payload: DealPaymentCreate) =>
       deals.addPayment(dealId, payload),
     onSuccess: (p) => {
-      setSessionPayments((prev) => [p, ...prev]);
-      qc.invalidateQueries({ queryKey: ["deal", dealId] });
-      toast.success("Платёж зафиксирован.");
+      invalidatePayments();
+      toast.success(paymentSavedMessage(p));
       setPayDialogOpen(false);
+    },
+    onError: (err) => toast.error(asApiError(err).message),
+  });
+
+  const markPaid = useMutation({
+    mutationFn: (paymentId: number) =>
+      deals.updatePayment(dealId, paymentId, {
+        delayed: false,
+        payment_date: new Date().toISOString().slice(0, 10),
+      }),
+    onSuccess: (p) => {
+      invalidatePayments();
+      toast.success(paymentSavedMessage(p));
+    },
+    onError: (err) => toast.error(asApiError(err).message),
+  });
+
+  const removePayment = useMutation({
+    mutationFn: (paymentId: number) => deals.removePayment(dealId, paymentId),
+    onSuccess: () => {
+      invalidatePayments();
+      toast.success("Платёж удалён.");
     },
     onError: (err) => toast.error(asApiError(err).message),
   });
@@ -345,17 +378,15 @@ export default function DealDetailPage({
             dealId={dealId}
             isCollaborator={isCollaborator}
             canManagePayments={canManagePayments}
-            payments={sessionPayments}
+            payments={d.payments ?? []}
+            busy={markPaid.isPending || removePayment.isPending}
+            onMarkPaid={(pid) => markPaid.mutate(pid)}
             onRemovePayment={(pid) => {
-              deals
-                .removePayment(dealId, pid)
-                .then(() => {
-                  setSessionPayments((prev) =>
-                    prev.filter((p) => p.id !== pid)
-                  );
-                  toast.success("Платёж удалён.");
-                })
-                .catch((err) => toast.error(asApiError(err).message));
+              const p = d.payments?.find((x) => x.id === pid);
+              const msg = p?.is_paid
+                ? "Удалить платёж? Он пропадёт и из «Доходов»."
+                : "Удалить платёж?";
+              if (confirm(msg)) removePayment.mutate(pid);
             }}
             onOpenAdd={() => setPayDialogOpen(true)}
           />
@@ -2016,17 +2047,26 @@ function AddLinkDialog({
 
 /* ------- Payments tab ------- *
  *
- * Backend exposes only POST /deals/{id}/payments/ and DELETE — there is no
- * GET endpoint for listing payments yet. To stay honest with the user, we
- * keep a session-local list of payments added during this session and show a
- * note explaining the limitation. Once the backend adds a GET endpoint, swap
- * the source to a useQuery against `/projects/{id}/payments/`.
+ * Payments come with the project. A received payment (not delayed, date not
+ * in the future) is also an income in «Доходы» and counts as «Оплачено»;
+ * planned and delayed ones wait for «Оплачен».
  */
+
+function paymentSavedMessage(p: DealPayment) {
+  if (p.linked_existing) {
+    return "Платёж связан с доходом, который уже был записан вручную.";
+  }
+  return p.is_paid
+    ? "Платёж зафиксирован и добавлен в доходы."
+    : "Платёж запланирован — в доходы попадёт, когда отметите его оплаченным.";
+}
 
 function PaymentsTab({
   isCollaborator,
   canManagePayments,
   payments,
+  busy,
+  onMarkPaid,
   onRemovePayment,
   onOpenAdd,
 }: {
@@ -2034,19 +2074,26 @@ function PaymentsTab({
   isCollaborator: boolean;
   canManagePayments: boolean;
   payments: DealPayment[];
+  busy: boolean;
+  onMarkPaid: (paymentId: number) => void;
   onRemovePayment: (paymentId: number) => void;
   onOpenAdd: () => void;
 }) {
+  const canManage = !isCollaborator && canManagePayments;
+  const sorted = [...payments].sort(
+    (a, b) => b.payment_date.localeCompare(a.payment_date) || b.id - a.id
+  );
+
   return (
     <Panel className="anim-fade">
       <PanelHeader>
-        <PanelTitle>График платежей</PanelTitle>
+        <PanelTitle>Платежи</PanelTitle>
         <div className="flex items-center gap-3">
           <span className="text-[12px] text-ink-3">
             {payments.length}{" "}
-            {plural(payments.length, "платёж", "платежа", "платежей")} за сессию
+            {plural(payments.length, "платёж", "платежа", "платежей")}
           </span>
-          {!isCollaborator && canManagePayments && (
+          {canManage && (
             <Button variant="primary" size="sm" onClick={onOpenAdd}>
               <Plus className="h-3.5 w-3.5" />
               Добавить
@@ -2055,41 +2102,32 @@ function PaymentsTab({
         </div>
       </PanelHeader>
       <PanelBody>
-        <p className="text-[12px] text-ink-3 mb-3">
-          Backend пока не отдаёт список платежей через GET. Здесь видны только
-          платежи, добавленные в этой сессии.
-        </p>
-        {payments.length === 0 ? (
+        {sorted.length === 0 ? (
           <div className="text-[13px] text-ink-4 py-8 text-center">
-            Платежей пока нет в этой сессии.
+            Платежей пока нет.
           </div>
         ) : (
           <Table>
             <THead>
               <TR>
-                <TH className="hidden sm:table-cell w-12">#</TH>
                 <TH>Дата</TH>
                 <TH className="text-right">Сумма</TH>
                 <TH>Статус</TH>
-                <TH className="w-10"></TH>
+                <TH className="w-[120px]"></TH>
               </TR>
             </THead>
             <tbody>
-              {payments.map((p, i) => {
-                const past = new Date(p.payment_date) < new Date();
+              {sorted.map((p) => {
                 const status: {
                   tone: "green" | "yellow" | "gray";
                   label: string;
-                } = p.delayed
+                } = p.is_paid
+                  ? { tone: "green", label: "оплачен · в доходах" }
+                  : p.delayed
                   ? { tone: "yellow", label: "задержан" }
-                  : past
-                  ? { tone: "green", label: "оплачен" }
                   : { tone: "gray", label: "запланирован" };
                 return (
                   <TR key={p.id}>
-                    <TD className="hidden sm:table-cell text-ink-3 tabular-nums">
-                      {String(i + 1).padStart(2, "0")}
-                    </TD>
                     <TD className="text-ink-2 tabular-nums">
                       {formatDate(p.payment_date)}
                     </TD>
@@ -2110,14 +2148,29 @@ function PaymentsTab({
                       </Badge>
                     </TD>
                     <TD>
-                      {!isCollaborator && canManagePayments && (
-                        <button
-                          onClick={() => onRemovePayment(p.id)}
-                          className="h-7 w-7 grid place-items-center rounded text-ink-3 hover:text-danger hover:bg-tag-red-bg/30 transition-colors"
-                          title="Удалить"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                      {canManage && (
+                        <div className="flex items-center justify-end gap-1">
+                          {!p.is_paid && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={busy}
+                              onClick={() => onMarkPaid(p.id)}
+                              title="Платёж получен сегодня — добавить в доходы"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              Оплачен
+                            </Button>
+                          )}
+                          <button
+                            onClick={() => onRemovePayment(p.id)}
+                            disabled={busy}
+                            className="h-7 w-7 grid place-items-center rounded text-ink-3 hover:text-danger hover:bg-tag-red-bg/30 transition-colors"
+                            title="Удалить"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       )}
                     </TD>
                   </TR>

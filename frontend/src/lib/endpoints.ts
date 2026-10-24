@@ -240,6 +240,14 @@ export const projects = {
     api
       .post<DealPayment>(`/projects/${dealId}/payments/`, payload)
       .then((r) => r.data),
+  updatePayment: (
+    dealId: number,
+    paymentId: number,
+    payload: Partial<DealPaymentCreate>
+  ) =>
+    api
+      .patch<DealPayment>(`/projects/${dealId}/payments/${paymentId}/`, payload)
+      .then((r) => r.data),
   removePayment: (dealId: number, paymentId: number) =>
     api
       .delete<void>(`/projects/${dealId}/payments/${paymentId}/`)

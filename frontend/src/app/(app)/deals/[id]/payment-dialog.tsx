@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
+import { WalletPicker } from "@/components/wallet-picker";
 import type { DealPaymentCreate } from "@/lib/types";
 
 export function AddPaymentDialog({
@@ -24,6 +25,8 @@ export function AddPaymentDialog({
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [delayed, setDelayed] = useState(false);
+  const [wallet, setWallet] = useState<number | null>(null);
+  const received = !delayed && date <= new Date().toISOString().slice(0, 10);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -31,12 +34,12 @@ export function AddPaymentDialog({
         <DialogHeader
           eyebrow="Проект · Платёж"
           title="Зафиксировать платёж"
-          description="Запишите полученный или запланированный платёж по этому проекту."
+          description="Полученный платёж сразу попадёт в «Доходы». Задержанный или будущий — когда отметите его оплаченным."
         />
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            onSubmit({ amount, payment_date: date, delayed });
+            onSubmit({ amount, payment_date: date, delayed, wallet });
           }}
           className="flex flex-col gap-4"
         >
@@ -69,6 +72,13 @@ export function AddPaymentDialog({
             />
             Платёж задержан
           </label>
+          {received && (
+            <WalletPicker
+              label="Куда зачислить"
+              value={wallet}
+              onChange={setWallet}
+            />
+          )}
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-hairline">
             <Button
               type="button"

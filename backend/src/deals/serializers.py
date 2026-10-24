@@ -5,6 +5,7 @@ from core.enums import UserRole
 from core.permissions import can_view_deal_amount, is_scoped_collaborator
 from src.deals.models import Deal, DealFile, DealLink, DealPayment, DealStage
 from src.users.serializers import UserSerializer
+from src.wallets.serializers import WalletSourceField
 
 
 class DealFileSerializer(serializers.ModelSerializer):
@@ -43,6 +44,11 @@ class DealFileSerializer(serializers.ModelSerializer):
 
 class DealPaymentSerializer(serializers.ModelSerializer):
     can_view_amount = serializers.SerializerMethodField()
+    # Wallet the received money lands in (its income); omitted → default.
+    wallet = WalletSourceField(write_only=True)
+    income = serializers.SerializerMethodField()
+    is_paid = serializers.SerializerMethodField()
+    linked_existing = serializers.SerializerMethodField()
 
     class Meta:
         model = DealPayment
@@ -51,13 +57,33 @@ class DealPaymentSerializer(serializers.ModelSerializer):
             'amount',
             'can_view_amount',
             'payment_date',
-            'delayed'
+            'delayed',
+            'wallet',
+            'income',
+            'is_paid',
+            'linked_existing',
         )
         read_only_fields = ('id', 'can_view_amount')
 
     def get_can_view_amount(self, obj) -> bool:
         request = self.context.get("request")
         return bool(request and can_view_deal_amount(request.user))
+
+    def get_income(self, obj):
+        income = getattr(obj, "income", None)
+        return income.pk if income else None
+
+    def get_is_paid(self, obj) -> bool:
+        return getattr(obj, "income", None) is not None
+
+    def get_linked_existing(self, obj) -> bool:
+        """Set right after a save that matched an income entered by hand."""
+        return bool(getattr(obj, "linked_existing", False))
+
+    def validate_wallet(self, value):
+        if value is not None and not value.is_active:
+            raise serializers.ValidationError("Кошелёк отключён — выберите другой.")
+        return value
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

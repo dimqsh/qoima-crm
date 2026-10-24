@@ -19,6 +19,7 @@ from src.deals.serializers import (
     DealStageSerializer,
 )
 from src.deals.serializers import DealSerializer
+from src.incomes.services import delete_deal_payment, sync_payment_income
 
 
 class DealFilter(django_filters.FilterSet):
@@ -53,6 +54,7 @@ class DealViewSet(
     serializers = {
         "create_file": DealFileSerializer,
         "create_payment": DealPaymentSerializer,
+        "update_payment": DealPaymentSerializer,
         "create_stage": DealStageSerializer,
         "update_stage": DealStageSerializer,
         "create_link": DealLinkSerializer,
@@ -99,10 +101,15 @@ class DealViewSet(
                 "links",
                 "files",
                 "payments",
+                "payments__income",
             )
             .annotate(
+                # Only money that actually came in, i.e. is in Доходы.
                 paid_to_date=Coalesce(
-                    Sum("payments__amount"),
+                    Sum(
+                        "payments__amount",
+                        filter=Q(payments__income__isnull=False),
+                    ),
                     zero_amount,
                     output_field=DecimalField(max_digits=20, decimal_places=2),
                 ),
@@ -223,8 +230,20 @@ class DealViewSet(
         deal = self.get_object()
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(deal=deal)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        wallet = serializer.validated_data.pop("wallet", None)
+
+        with transaction.atomic():
+            payment = serializer.save(deal=deal)
+            _, payment.linked_existing = sync_payment_income(
+                payment,
+                wallet=wallet,
+                actor=request.user,
+            )
+
+        return Response(
+            self.get_serializer(payment).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["delete"], url_path=r"files/(?P<file_id>[^/.]+)")
     def delete_file(self, request, file_id=None, *args, **kwargs):
@@ -239,9 +258,32 @@ class DealViewSet(
     @action(detail=True, methods=["delete"], url_path=r"payments/(?P<payment_id>[^/.]+)")
     def delete_payment(self, request, payment_id=None, *args, **kwargs):
         deal = self.get_object()
-        deleted_count, _ = deal.payments.filter(id=payment_id).delete()
+        payment = deal.payments.filter(id=payment_id).first()
 
-        if deleted_count == 0:
+        if payment is None:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        delete_deal_payment(payment, actor=request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @delete_payment.mapping.patch
+    def update_payment(self, request, payment_id=None, *args, **kwargs):
+        deal = self.get_object()
+        payment = deal.payments.filter(id=payment_id).first()
+
+        if payment is None:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = self.get_serializer(payment, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        wallet = serializer.validated_data.pop("wallet", None)
+
+        with transaction.atomic():
+            payment = serializer.save()
+            _, payment.linked_existing = sync_payment_income(
+                payment,
+                wallet=wallet,
+                actor=request.user,
+            )
+
+        return Response(self.get_serializer(payment).data)

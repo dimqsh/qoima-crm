@@ -16,6 +16,17 @@ class Income(models.Model):
         on_delete=models.PROTECT,
         related_name="incomes",
     )
+    # Payments recorded on a project («Зафиксировать платёж») are incomes too.
+    deal_payment = models.OneToOneField(
+        "deals.DealPayment",
+        blank=True,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="income",
+    )
+    # True when the payment created this income; False for an income entered
+    # by hand that was later matched to a payment.
+    created_from_payment = models.BooleanField(default=False, editable=False)
 
     class Meta:
         ordering = ("-date_earned", "-id")

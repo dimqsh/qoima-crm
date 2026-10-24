@@ -58,6 +58,9 @@ export function IncomeFormDialog({
       qc.invalidateQueries({ queryKey: ["wallets-current"] });
       qc.invalidateQueries({ queryKey: ["wallets-logs"] });
       qc.invalidateQueries({ queryKey: ["wallets-analytics"] });
+      // A project payment's income edits that project's «Оплачено».
+      qc.invalidateQueries({ queryKey: ["deal"] });
+      qc.invalidateQueries({ queryKey: ["deals"] });
       toast.success(
         initial
           ? "Запись обновлена."

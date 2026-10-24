@@ -7,6 +7,7 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from src.incomes.filters import IncomeFilter
+from src.deals.models import DealPayment
 from src.incomes.models import Income
 from src.incomes.serializers import IncomeSerializer
 from src.wallets.services import (
@@ -21,7 +22,10 @@ class IncomeViewSet(
     BaseSerializerMixin,
     viewsets.ModelViewSet,
 ):
-    queryset = Income.objects.select_related("wallet").order_by("-date_earned", "-id")
+    queryset = Income.objects.select_related(
+        "wallet",
+        "deal_payment__deal",
+    ).order_by("-date_earned", "-id")
     serializer_class = IncomeSerializer
     permission_classes = (AccountingPermissions,)
 
@@ -45,10 +49,22 @@ class IncomeViewSet(
                 actor=self.request.user,
             )
 
+            # A project payment and its income are one record: keep the
+            # project's «Оплачено» in step with edits made in Доходы.
+            if income.deal_payment_id:
+                DealPayment.objects.filter(pk=income.deal_payment_id).update(
+                    amount=income.amount,
+                    payment_date=income.date_earned,
+                )
+
     def perform_destroy(self, instance):
         with transaction.atomic():
             record_income_deleted(instance, actor=self.request.user)
+            payment_id = instance.deal_payment_id
             instance.delete()
+
+            if payment_id:
+                DealPayment.objects.filter(pk=payment_id).delete()
 
     def _filtered_without(self, *ignored_params):
         params = self.request.query_params.copy()

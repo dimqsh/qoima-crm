@@ -106,6 +106,7 @@ class DealPermissions(EmployeeFlagPermission):
         "delete_link": "deals_can_update",
         "delete_file": "deals_can_update",
         "delete_payment": "deals_can_update",
+        "update_payment": "deals_can_update",
     }
 
     def has_permission(self, request, view):

@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 from core.enums import UserRole
 from src.deals.models import Deal, DealFile, DealLink, DealPayment, DealStage
 from src.employees.models import Employee
+from src.incomes.services import sync_payment_income
 from src.onboards.models import Task, TaskPerformance
 
 
@@ -334,11 +335,13 @@ class ProjectFeatureTests(TestCase):
 
     def test_project_amounts_are_masked_without_amount_permission(self):
         deal = self.create_project()
-        DealPayment.objects.create(
+        payment = DealPayment.objects.create(
             deal=deal,
             amount="700000.00",
             payment_date="2026-06-05",
         )
+        payment.refresh_from_db()
+        sync_payment_income(payment)
         employee_user = get_user_model().objects.create_user(
             username="manager",
             email="manager@example.com",

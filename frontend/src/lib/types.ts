@@ -213,12 +213,19 @@ export interface DealPayment {
   can_view_amount?: boolean;
   payment_date: string;
   delayed: boolean;
+  /** Income this payment is in «Доходы» as; null while planned/delayed. */
+  income?: number | null;
+  is_paid?: boolean;
+  /** True right after saving when it matched an income entered by hand. */
+  linked_existing?: boolean;
 }
 
 export interface DealPaymentCreate {
   amount: string;
   payment_date?: string;
   delayed?: boolean;
+  /** Wallet the received money lands in; omitted → default wallet. */
+  wallet?: number | null;
 }
 
 /* -------------------- Onboards / Tasks -------------------- */
@@ -408,6 +415,9 @@ export interface Income {
   note: string | null;
   wallet: number | null;
   wallet_name: string | null;
+  /** Project, when the income is a payment recorded there. */
+  deal?: number | null;
+  deal_name?: string | null;
 }
 
 export interface IncomeByType {
