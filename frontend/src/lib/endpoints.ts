@@ -305,6 +305,11 @@ export const onboards = {
       .then((r) => r.data),
   removeTask: (id: number) =>
     api.delete<void>(`/onboards/tasks/${id}/`).then((r) => r.data),
+  /** Drop a card into `category` right before task `before` (null = end). */
+  moveTask: (id: number, payload: { category: number; before: number | null }) =>
+    api
+      .post<OnboardTask>(`/onboards/tasks/${id}/move/`, payload)
+      .then((r) => r.data),
   uploadTaskAttachment: (taskId: number, formData: FormData) =>
     api
       .post<TaskAttachment | TaskAttachment[]>(

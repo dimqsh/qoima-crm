@@ -13,7 +13,7 @@ import { incomes, wallets } from "@/lib/endpoints";
 import { usePagedList } from "@/lib/use-paged-list";
 import { LoadMore } from "@/components/load-more";
 import { WalletBreakdown } from "@/components/wallet-breakdown";
-import { typeMetaForIncome } from "@/lib/income-type-meta";
+import { INCOME_TYPES, typeMetaForIncome } from "@/lib/income-type-meta";
 import { formatCurrency, formatDate, cn, plural } from "@/lib/utils";
 import { asApiError } from "@/lib/api";
 import { useChartColors } from "@/lib/use-chart-colors";
@@ -100,6 +100,13 @@ export default function IncomesPage() {
   });
   const listQ = paged.query;
 
+  // Incomes are few and read as one ledger — pull every page right away
+  // instead of making the user click "Показать ещё".
+  const { hasMore, isLoadingMore, loadAll } = paged;
+  useEffect(() => {
+    if (hasMore && !isLoadingMore) void loadAll();
+  }, [hasMore, isLoadingMore, loadAll]);
+
   const walletsQ = useQuery({
     queryKey: ["wallets"],
     queryFn: wallets.list,
@@ -112,8 +119,9 @@ export default function IncomesPage() {
     enabled: allowed,
   });
 
-  // Filters and search run on the server; pages are appended on demand.
+  // Filters and search run on the server; the list arrives newest first.
   const filtered = paged.items;
+  const months = useMemo(() => groupByMonth(filtered), [filtered]);
 
   const analytics = analyticsQ.data;
   const totalAmount = Number(analytics?.total.total_amount ?? 0);
@@ -137,6 +145,12 @@ export default function IncomesPage() {
         })),
     [analytics]
   );
+
+  const typeOptions = useMemo(() => {
+    const keys = new Set([...INCOME_TYPES, ...byType.map((b) => b.name)]);
+    if (activeType) keys.add(activeType);
+    return [...keys].sort((a, b) => labelFor(a).localeCompare(labelFor(b), "ru"));
+  }, [byType, activeType]);
 
   const filtersActive = Boolean(
     activeType || fromDate || toDate || search || activeWallet
@@ -229,6 +243,23 @@ export default function IncomesPage() {
           </div>
           <div className="w-full md:w-auto">
             <label className="text-[12px] font-medium text-ink-2 mb-1.5 block">
+              Категория
+            </label>
+            <select
+              value={activeType ?? ""}
+              onChange={(e) => setActiveType(e.target.value || null)}
+              className="h-9 w-full md:w-[180px] bg-canvas border border-hairline-strong rounded-md px-3 text-[14px] text-ink hover:border-ink-5 focus:border-accent outline-none transition-colors cursor-pointer"
+            >
+              <option value="">Все категории</option>
+              {typeOptions.map((t) => (
+                <option key={t} value={t}>
+                  {iconFor(t)} {labelFor(t)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="w-full md:w-auto">
+            <label className="text-[12px] font-medium text-ink-2 mb-1.5 block">
               С даты
             </label>
             <Input
@@ -289,7 +320,60 @@ export default function IncomesPage() {
           </Panel>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.4fr] gap-4 mb-6">
+        <Panel className="mb-6">
+          <PanelHeader>
+            <PanelTitle>Все доходы</PanelTitle>
+            <span className="text-[12px] text-ink-3 tabular-nums">
+              {listQ.isLoading
+                ? "Загрузка…"
+                : `${paged.total} ${plural(
+                    paged.total,
+                    "запись",
+                    "записи",
+                    "записей"
+                  )} · ${formatCurrency(totalAmount)}`}
+            </span>
+          </PanelHeader>
+          <Table>
+            <THead>
+              <TR>
+                <TH className="hidden sm:table-cell w-[88px]">Дата</TH>
+                <TH>Название</TH>
+                <TH className="hidden sm:table-cell">Категория</TH>
+                <TH className="hidden lg:table-cell">Кошелёк</TH>
+                <TH className="text-right">Сумма</TH>
+                <TH className="w-[72px] pl-0 pr-2 sm:px-4"></TH>
+              </TR>
+            </THead>
+            <tbody>
+              {months.map((m) => (
+                <MonthGroup
+                  key={m.key}
+                  month={m}
+                  canEdit={canUpdateEntry}
+                  canDelete={canDeleteEntry}
+                />
+              ))}
+              {!listQ.isLoading && filtered.length === 0 && (
+                <TR>
+                  <TD colSpan={6} className="text-center text-ink-4 py-12">
+                    Ничего не найдено.
+                  </TD>
+                </TR>
+              )}
+            </tbody>
+          </Table>
+          <LoadMore
+            shown={filtered.length}
+            total={paged.total}
+            hasMore={paged.hasMore}
+            onMore={paged.loadMore}
+            onAll={paged.loadAll}
+            loading={paged.isLoadingMore}
+          />
+        </Panel>
+
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.4fr] gap-4">
           <Panel>
             <PanelHeader>
               <PanelTitle>По категориям</PanelTitle>
@@ -467,60 +551,84 @@ export default function IncomesPage() {
           </Panel>
         </div>
 
-        <Panel>
-          <PanelHeader>
-            <PanelTitle>Все доходы</PanelTitle>
-            <span className="text-[12px] text-ink-3">
-              {listQ.isLoading
-                ? "Загрузка…"
-                : `${paged.total} ${plural(
-                    paged.total,
-                    "запись",
-                    "записи",
-                    "записей"
-                  )}`}
-            </span>
-          </PanelHeader>
-          <Table>
-            <THead>
-              <TR>
-                <TH>Название</TH>
-                <TH>Категория</TH>
-                <TH className="hidden sm:table-cell">Кошелёк</TH>
-                <TH className="text-right">Сумма</TH>
-                <TH className="hidden md:table-cell">Дата</TH>
-                <TH className="hidden md:table-cell">Заметка</TH>
-                <TH className="w-20"></TH>
-              </TR>
-            </THead>
-            <tbody>
-              {filtered.map((s) => (
-                <IncomeRow
-                  key={s.id}
-                  s={s}
-                  canEdit={canUpdateEntry}
-                  canDelete={canDeleteEntry}
-                />
-              ))}
-              {!listQ.isLoading && filtered.length === 0 && (
-                <TR>
-                  <TD colSpan={7} className="text-center text-ink-4 py-12">
-                    Ничего не найдено.
-                  </TD>
-                </TR>
-              )}
-            </tbody>
-          </Table>
-          <LoadMore
-            shown={filtered.length}
-            total={paged.total}
-            hasMore={paged.hasMore}
-            onMore={paged.loadMore}
-            onAll={paged.loadAll}
-            loading={paged.isLoadingMore}
-          />
-        </Panel>
       </main>
+    </>
+  );
+}
+
+type MonthBucket = {
+  key: string;
+  label: string;
+  total: number;
+  items: Income[];
+};
+
+/** Split the (date-desc) list into calendar months, keeping order. */
+function groupByMonth(list: Income[]): MonthBucket[] {
+  const buckets: MonthBucket[] = [];
+  for (const s of list) {
+    const key = s.date_earned.slice(0, 7);
+    let bucket = buckets[buckets.length - 1];
+    if (!bucket || bucket.key !== key) {
+      const [y, m] = key.split("-").map(Number);
+      const month = new Intl.DateTimeFormat("ru-RU", { month: "long" }).format(
+        new Date(y, m - 1, 1)
+      );
+      bucket = {
+        key,
+        label: `${month.charAt(0).toUpperCase()}${month.slice(1)} ${y}`,
+        total: 0,
+        items: [],
+      };
+      buckets.push(bucket);
+    }
+    bucket.total += Number(s.amount);
+    bucket.items.push(s);
+  }
+  return buckets;
+}
+
+function MonthGroup({
+  month,
+  canEdit,
+  canDelete,
+}: {
+  month: MonthBucket;
+  canEdit: boolean;
+  canDelete: boolean;
+}) {
+  const label = (
+    <>
+      {month.label}
+      <span className="text-ink-4 font-normal">
+        {" "}
+        · {month.items.length}{" "}
+        {plural(month.items.length, "запись", "записи", "записей")}
+      </span>
+    </>
+  );
+
+  return (
+    <>
+      {/* Cells mirror the column visibility so the total sits under «Сумма». */}
+      <tr className="text-[12px] [&>td]:h-9 [&>td]:px-3 sm:[&>td]:px-4 [&>td]:bg-surface-2/70 [&>td]:border-b [&>td]:border-hairline">
+        <td
+          colSpan={2}
+          className="hidden sm:table-cell font-medium text-ink-2 whitespace-nowrap"
+        >
+          {label}
+        </td>
+        <td className="sm:hidden font-medium text-ink-2">{label}</td>
+        <td className="hidden sm:table-cell" />
+        <td className="hidden lg:table-cell" />
+        <td className="text-right font-medium text-ink tabular-nums whitespace-nowrap">
+          {formatCurrency(month.total)}
+        </td>
+        <td />
+      </tr>
+      {month.items.map((s) => (
+        <IncomeRow key={s.id} s={s} canEdit={canEdit} canDelete={canDelete} />
+      ))}
     </>
   );
 }
@@ -552,8 +660,39 @@ function IncomeRow({
 
   return (
     <TR>
-      <TD className="text-ink">{s.name}</TD>
-      <TD>
+      <TD className="hidden sm:table-cell text-ink-3 text-[13px] tabular-nums whitespace-nowrap">
+        {formatDate(s.date_earned, { day: "numeric", month: "short" })}
+      </TD>
+      <TD className="py-2">
+        <div className="text-ink leading-snug">{s.name}</div>
+        {s.note && (
+          <div
+            className="text-[12px] text-ink-3 leading-snug mt-0.5 line-clamp-2 max-w-[48ch]"
+            title={s.note}
+          >
+            {s.note}
+          </div>
+        )}
+        {/* Date, category and wallet fold under the name on narrow screens. */}
+        <div className="sm:hidden mt-1 flex items-center gap-2 flex-wrap">
+          <span className="text-[12px] text-ink-3 tabular-nums">
+            {formatDate(s.date_earned, { day: "numeric", month: "short" })}
+          </span>
+          <Badge tone={typeMetaForIncome(s.type).tone}>
+            <span className="text-[12px] leading-none" aria-hidden>
+              {iconFor(s.type)}
+            </span>
+            {labelFor(s.type)}
+          </Badge>
+        </div>
+        {s.wallet_name && (
+          <div className="lg:hidden mt-1 inline-flex items-center gap-1 text-[12px] text-ink-3">
+            <WalletIcon className="h-3 w-3 text-ink-4" />
+            {s.wallet_name}
+          </div>
+        )}
+      </TD>
+      <TD className="hidden sm:table-cell">
         <Badge tone={typeMetaForIncome(s.type).tone}>
           <span className="text-[12px] leading-none" aria-hidden>
             {iconFor(s.type)}
@@ -561,7 +700,7 @@ function IncomeRow({
           {labelFor(s.type)}
         </Badge>
       </TD>
-      <TD className="hidden sm:table-cell">
+      <TD className="hidden lg:table-cell">
         {s.wallet_name ? (
           <span className="inline-flex items-center gap-1.5 text-[12px] text-ink-2 whitespace-nowrap">
             <WalletIcon className="h-3.5 w-3.5 text-ink-4" />
@@ -574,11 +713,9 @@ function IncomeRow({
       <TD className="text-right font-medium tabular-nums whitespace-nowrap">
         {formatCurrency(s.amount)}
       </TD>
-      <TD className="hidden md:table-cell text-ink-3 tabular-nums whitespace-nowrap">{formatDate(s.date_earned)}</TD>
-      <TD className="hidden md:table-cell text-ink-3 max-w-[140px] sm:max-w-[280px] truncate">{s.note || "—"}</TD>
-      <TD>
+      <TD className="pl-0 pr-2 sm:px-4">
         {hasActions && (
-        <div className="flex items-center justify-end gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+        <div className="flex items-center justify-end gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
           {canEdit && (
           <IncomeFormDialog
             initial={s}

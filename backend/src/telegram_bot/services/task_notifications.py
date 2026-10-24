@@ -65,6 +65,5 @@ def _client_task_message(task: Task, deal) -> str:
             f"🆕 Новая задача от клиента {client_label}",
             f"Проект: {deal_label}",
             f"Задача: {task.name} (срок: {task.date_end.isoformat()})",
-            "Статус: на согласовании",
         ]
     )

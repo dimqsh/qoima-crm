@@ -12,10 +12,9 @@ import { Button } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/input";
 import { onboards } from "@/lib/endpoints";
 import { asApiError } from "@/lib/api";
-import { useIsSuperuser, useRole } from "@/lib/permissions";
 import { cn, formatBytes } from "@/lib/utils";
 import { VoiceRecorder } from "@/components/voice-recorder";
-import { Info, Loader2, Paperclip, Plus, X } from "lucide-react";
+import { Loader2, Paperclip, Plus, X } from "lucide-react";
 import type {
   OnboardTaskCreate,
   TaskCategory,
@@ -58,9 +57,6 @@ export function AddTaskDialog({
   defaultCategoryId?: number;
 }) {
   const qc = useQueryClient();
-  const role = useRole();
-  const isSuper = useIsSuperuser();
-  const needsApproval = role === "collaborator" && !isSuper;
 
   const [name, setName] = useState("");
   const [type, setType] = useState("deliverable");
@@ -147,9 +143,7 @@ export function AddTaskDialog({
       qc.invalidateQueries({ queryKey: ["onboard"] });
       qc.invalidateQueries({ queryKey: ["onboards-for-deal"] });
       qc.invalidateQueries({ queryKey: ["onboards"] });
-      toast.success(
-        needsApproval ? "Задача отправлена на одобрение." : "Задача создана."
-      );
+      toast.success("Задача создана.");
       onOpenChange(false);
       reset();
     },
@@ -168,22 +162,9 @@ export function AddTaskDialog({
       <DialogContent className="max-w-[540px]">
         <DialogHeader
           eyebrow="Задача · Новая"
-          title={needsApproval ? "Предложить задачу" : "Создать задачу"}
-          description={
-            needsApproval
-              ? "Задача появится в плане после одобрения администратором."
-              : "Задача добавится в выбранную категорию плана работ этого проекта."
-          }
+          title="Создать задачу"
+          description="Задача добавится в выбранную категорию плана работ этого проекта."
         />
-        {needsApproval && (
-          <div className="flex items-start gap-2 mb-1 px-3 py-2 rounded-md bg-tag-yellow-bg/60 text-tag-yellow-fg text-[12px]">
-            <Info className="h-3.5 w-3.5 shrink-0 mt-px" />
-            <span>
-              Статус новой задачи — <strong>ожидает одобрения</strong>. Уведомление
-              уйдёт администраторам в Telegram.
-            </span>
-          </div>
-        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -311,12 +292,12 @@ export function AddTaskDialog({
               {mutation.isPending ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {needsApproval ? "Отправляем…" : "Создаём…"}
+                  Создаём…
                 </>
               ) : (
                 <>
                   <Plus className="h-3.5 w-3.5" />
-                  {needsApproval ? "Отправить на одобрение" : "Создать"}
+                  Создать
                 </>
               )}
             </Button>

@@ -93,7 +93,7 @@ class CollaboratorOnboardAccessTests(TestCase):
             Task.objects.filter(
                 id=response.data["id"],
                 category=self.own_category,
-                approval_status=Task.ApprovalStatus.PENDING,
+                approval_status=Task.ApprovalStatus.APPROVED,
                 created_by=self.collaborator,
             ).exists()
         )
@@ -269,11 +269,11 @@ class TaskApprovalTelegramTests(TestCase):
         shutil.rmtree(self.media_root, ignore_errors=True)
         super().tearDown()
 
-    @patch(
-        "src.telegram_bot.services.telegram.TelegramClient.send_message_with_result",
-        return_value={"ok": True, "result": {"message_id": 77}},
-    )
-    def test_collaborator_task_creation_requests_telegram_approval(self, send_message):
+    @patch("src.telegram_bot.services.telegram.TelegramClient.send_message_with_result")
+    def test_collaborator_task_creation_is_approved_without_telegram_request(
+        self,
+        send_message,
+    ):
         self.client.force_authenticate(self.collaborator)
 
         with self.captureOnCommitCallbacks(execute=True):
@@ -285,17 +285,10 @@ class TaskApprovalTelegramTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         task = Task.objects.get(pk=response.data["id"])
-        self.assertEqual(task.approval_status, Task.ApprovalStatus.PENDING)
+        self.assertEqual(task.approval_status, Task.ApprovalStatus.APPROVED)
+        self.assertEqual(task.approval_action, "")
         self.assertEqual(task.created_by, self.collaborator)
-        send_message.assert_called_once()
-        chat_id, text = send_message.call_args.args[:2]
-        self.assertEqual(chat_id, self.chat.chat_id)
-        self.assertIn("Новая задача ожидает одобрения", text)
-        self.assertTrue(
-            task.audit_logs.filter(
-                action=TaskAuditLog.Action.APPROVAL_REQUESTED,
-            ).exists()
-        )
+        send_message.assert_not_called()
 
     @patch("src.telegram_bot.services.telegram.TelegramClient.edit_message_text")
     @patch("src.telegram_bot.services.telegram.TelegramClient.answer_callback_query")
@@ -353,55 +346,55 @@ class TaskApprovalTelegramTests(TestCase):
             ).exists()
         )
 
-    @patch(
-        "src.telegram_bot.services.telegram.TelegramClient.send_message_with_result",
-        return_value={"ok": True, "result": {"message_id": 88}},
-    )
-    def test_collaborator_delete_task_requests_cancellation_approval(self, send_message):
+    @patch("src.telegram_bot.services.telegram.TelegramClient.send_message_with_result")
+    def test_collaborator_delete_task_cancels_it_directly(self, send_message):
         task = self.create_approved_task()
         self.client.force_authenticate(self.collaborator)
 
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.delete(f"/api/onboards/tasks/{task.id}/")
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 204)
         task.refresh_from_db()
-        self.assertEqual(task.approval_status, Task.ApprovalStatus.PENDING)
-        self.assertEqual(task.approval_action, Task.ApprovalAction.CANCEL)
-        self.assertEqual(task.approval_requested_by, self.collaborator)
-        self.assertTrue(task.is_active)
-        self.assertNotEqual(task.status, Task.Status.CANCELLED)
-        send_message.assert_called_once()
-        _, text = send_message.call_args.args[:2]
-        self.assertIn("Отмена задачи ожидает одобрения", text)
+        self.assertEqual(task.approval_status, Task.ApprovalStatus.CANCELLED)
+        self.assertEqual(task.status, Task.Status.CANCELLED)
+        self.assertFalse(task.is_active)
+        self.assertEqual(task.cancelled_by, self.collaborator)
+        send_message.assert_not_called()
         self.assertTrue(
             task.audit_logs.filter(
-                action=TaskAuditLog.Action.CANCELLATION_REQUESTED,
+                action=TaskAuditLog.Action.CANCELLED,
                 actor=self.collaborator,
             ).exists()
         )
 
-    @patch(
-        "src.telegram_bot.services.telegram.TelegramClient.send_message_with_result",
-        return_value={"ok": True, "result": {"message_id": 88}},
-    )
-    def test_collaborator_status_cancel_requests_cancellation_approval(self, send_message):
+    @patch("src.telegram_bot.services.telegram.TelegramClient.send_message_with_result")
+    def test_collaborator_can_update_task_directly(self, send_message):
         task = self.create_approved_task(status=Task.Status.IN_PROGRESS)
+        other_category = TaskCategory.objects.create(
+            name="Done",
+            onboard=self.category.onboard,
+        )
         self.client.force_authenticate(self.collaborator)
 
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.patch(
                 f"/api/onboards/tasks/{task.id}/",
-                {"status": Task.Status.CANCELLED},
+                {
+                    "name": "Renamed",
+                    "category": other_category.id,
+                    "status": Task.Status.CANCELLED,
+                },
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 200)
         task.refresh_from_db()
-        self.assertEqual(task.approval_status, Task.ApprovalStatus.PENDING)
-        self.assertEqual(task.approval_action, Task.ApprovalAction.CANCEL)
-        self.assertEqual(task.status, Task.Status.IN_PROGRESS)
-        send_message.assert_called_once()
+        self.assertEqual(task.name, "Renamed")
+        self.assertEqual(task.category, other_category)
+        self.assertEqual(task.status, Task.Status.CANCELLED)
+        self.assertEqual(task.approval_status, Task.ApprovalStatus.APPROVED)
+        send_message.assert_not_called()
 
     @patch("src.telegram_bot.services.telegram.TelegramClient.edit_message_text")
     @patch("src.telegram_bot.services.telegram.TelegramClient.answer_callback_query")
@@ -641,7 +634,7 @@ class ClientTaskResponsibleNotificationTests(TestCase):
         self.assertIn("Новая задача от клиента Иван Клиентов", text)
         self.assertIn("Мучной завод", text)
         self.assertIn("New task", text)
-        self.assertIn("на согласовании", text)
+        self.assertNotIn("на согласовании", text)
 
     @patch(
         "src.telegram_bot.services.telegram.TelegramClient.send_message",
@@ -715,3 +708,104 @@ class ClientTaskResponsibleNotificationTests(TestCase):
             "date_start": "2026-06-01",
             "date_end": "2026-06-30",
         }
+
+
+class TaskMoveTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.collaborator = get_user_model().objects.create_user(
+            username="client-m",
+            email="client-m@example.com",
+            password="password",
+            role=UserRole.COLLABORATOR,
+        )
+        deal = Deal.objects.create(
+            user=self.collaborator,
+            stage="active",
+            date_start="2026-06-01",
+            date_end="2026-06-30",
+            deal_amount="100000.00",
+            payment_type="cash",
+        )
+        deal.collaborators.add(self.collaborator)
+        onboard = Onboard.objects.create(deal=deal, term_of_end="2026-06-30")
+        self.todo = TaskCategory.objects.create(name="Todo", onboard=onboard)
+        self.done = TaskCategory.objects.create(name="Done", onboard=onboard)
+        self.a = self.create_task(self.todo, "A")
+        self.b = self.create_task(self.todo, "B")
+        self.c = self.create_task(self.todo, "C")
+        self.x = self.create_task(self.done, "X")
+        self.y = self.create_task(self.done, "Y")
+        self.client.force_authenticate(self.collaborator)
+
+    def test_new_tasks_are_appended_to_their_column(self):
+        self.assertEqual(
+            [self.a.position, self.b.position, self.c.position],
+            [0, 1, 2],
+        )
+        self.assertEqual([self.x.position, self.y.position], [0, 1])
+
+    def test_move_to_other_column_before_card(self):
+        response = self.client.post(
+            f"/api/onboards/tasks/{self.c.id}/move/",
+            {"category": self.done.id, "before": self.y.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.names(self.done), ["X", "C", "Y"])
+        self.assertEqual(self.names(self.todo), ["A", "B"])
+        self.assertTrue(
+            self.c.audit_logs.filter(action=TaskAuditLog.Action.UPDATED).exists()
+        )
+
+    def test_move_to_end_of_other_column(self):
+        response = self.client.post(
+            f"/api/onboards/tasks/{self.a.id}/move/",
+            {"category": self.done.id, "before": None},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.names(self.done), ["X", "Y", "A"])
+
+    def test_reorder_inside_column(self):
+        response = self.client.post(
+            f"/api/onboards/tasks/{self.c.id}/move/",
+            {"category": self.todo.id, "before": self.a.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.names(self.todo), ["C", "A", "B"])
+        self.assertFalse(
+            self.c.audit_logs.filter(action=TaskAuditLog.Action.UPDATED).exists()
+        )
+
+    def test_move_rejects_column_from_other_onboard(self):
+        foreign_onboard = Onboard.objects.create(term_of_end="2026-06-30")
+        foreign = TaskCategory.objects.create(name="Foreign", onboard=foreign_onboard)
+
+        response = self.client.post(
+            f"/api/onboards/tasks/{self.a.id}/move/",
+            {"category": foreign.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.category, self.todo)
+
+    def names(self, category):
+        return list(
+            Task.objects.filter(category=category).values_list("name", flat=True)
+        )
+
+    def create_task(self, category, name):
+        return Task.objects.create(
+            category=category,
+            name=name,
+            type="deliverable",
+            date_start="2026-06-01",
+            date_end="2026-06-30",
+        )

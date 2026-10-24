@@ -108,8 +108,22 @@ class Task(models.Model):
     )
     cancelled_at = models.DateTimeField(null=True, blank=True)
     review_comment = models.TextField(blank=True, default="")
+    # Order of the card inside its board column (category).
+    position = models.PositiveIntegerField(default=0, db_index=True)
     created_at = models.DateTimeField(default=timezone.now, editable=False)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("position", "id")
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and not self.position and self.category_id:
+            last = Task.objects.filter(category_id=self.category_id).aggregate(
+                last=models.Max("position"),
+            )["last"]
+            self.position = 0 if last is None else last + 1
+
+        super().save(*args, **kwargs)
 
     @property
     def is_cancelled(self):

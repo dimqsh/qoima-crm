@@ -2,16 +2,21 @@ from django.contrib.auth import get_user_model
 from core.permissions import is_scoped_collaborator
 from core.views import BasePermissionMixin, BaseSerializerMixin
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Max, Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from src.onboards.models import Task, TaskAttachment, TaskAuditLog, TaskPerformance
+from src.onboards.models import (
+    Task,
+    TaskAttachment,
+    TaskAuditLog,
+    TaskCategory,
+    TaskPerformance,
+)
 from src.onboards.services import record_task_event
 
 from src.onboards.serializers import TaskAttachmentSerializer, TaskSerializer
@@ -58,21 +63,11 @@ class TaskViewSet(
 
     def perform_create(self, serializer):
         user = self.request.user
-        approval_status = (
-            Task.ApprovalStatus.PENDING
-            if is_scoped_collaborator(user)
-            else Task.ApprovalStatus.APPROVED
-        )
-        pending_approval = approval_status == Task.ApprovalStatus.PENDING
+        # Clients manage tasks on their own projects directly — no approval.
         task = serializer.save(
             created_by=user,
             created_via=Task.CreatedVia.API,
-            approval_status=approval_status,
-            approval_action=(
-                Task.ApprovalAction.CREATE if pending_approval else ""
-            ),
-            approval_requested_by=user if pending_approval else None,
-            approval_requested_at=timezone.now() if pending_approval else None,
+            approval_status=Task.ApprovalStatus.APPROVED,
         )
         record_task_event(
             task,
@@ -80,34 +75,27 @@ class TaskViewSet(
             TaskAuditLog.Action.CREATED,
             description="Task created.",
             metadata={
-                "approval_status": approval_status,
+                "approval_status": task.approval_status,
                 "approval_action": task.approval_action,
                 "status": task.status,
             },
         )
 
-        if pending_approval:
-            transaction.on_commit(lambda: self._send_approval_request(task.pk))
+        if is_scoped_collaborator(user):
             transaction.on_commit(lambda: self._notify_responsibles(task.pk))
-
-    def update(self, request, *args, **kwargs):
-        instance = self.get_object()
-        requested_status = request.data.get("status")
-
-        if (
-            is_scoped_collaborator(request.user)
-            and requested_status == Task.Status.CANCELLED
-        ):
-            self._request_task_cancellation(instance)
-            instance.refresh_from_db()
-            serializer = self.get_serializer(instance)
-            return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
-
-        return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
         changed_fields = sorted(serializer.validated_data.keys())
-        task = serializer.save()
+        new_category = serializer.validated_data.get("category")
+        extra = {}
+
+        if new_category and new_category.pk != serializer.instance.category_id:
+            last = Task.objects.filter(category=new_category).aggregate(
+                last=Max("position"),
+            )["last"]
+            extra["position"] = 0 if last is None else last + 1
+
+        task = serializer.save(**extra)
         record_task_event(
             task,
             self.request.user,
@@ -115,18 +103,6 @@ class TaskViewSet(
             description="Task updated.",
             metadata={"fields": changed_fields},
         )
-
-    def destroy(self, request, *args, **kwargs):
-        instance = self.get_object()
-
-        if is_scoped_collaborator(request.user):
-            self._request_task_cancellation(instance)
-            instance.refresh_from_db()
-            serializer = self.get_serializer(instance)
-            return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
-
-        self.perform_destroy(instance)
-        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def perform_destroy(self, instance):
         now = timezone.now()
@@ -158,52 +134,70 @@ class TaskViewSet(
             description="Task cancelled.",
         )
 
-    def _request_task_cancellation(self, task):
-        if task.status == Task.Status.CANCELLED or task.is_cancelled:
-            raise ValidationError({"detail": "Task is already cancelled."})
-
-        if task.approval_status == Task.ApprovalStatus.PENDING:
-            if task.approval_action == Task.ApprovalAction.CANCEL:
-                return
-
-            raise ValidationError(
-                {"detail": "Task already has a pending approval request."}
-            )
-
-        now = timezone.now()
-        task.approval_status = Task.ApprovalStatus.PENDING
-        task.approval_action = Task.ApprovalAction.CANCEL
-        task.approval_requested_by = self.request.user
-        task.approval_requested_at = now
-        task.save(
-            update_fields=(
-                "approval_status",
-                "approval_action",
-                "approval_requested_by",
-                "approval_requested_at",
-                "updated_at",
-            )
-        )
-        record_task_event(
-            task,
-            self.request.user,
-            TaskAuditLog.Action.CANCELLATION_REQUESTED,
-            description="Task cancellation requested.",
-            metadata={"status": task.status},
-        )
-        transaction.on_commit(lambda: self._send_approval_request(task.pk))
-
-    def _send_approval_request(self, task_id):
-        from src.telegram_bot.services.task_approval import TelegramTaskApprovalService
-
-        TelegramTaskApprovalService().send_request(task_id)
-
     def _notify_responsibles(self, task_id):
         from src.telegram_bot.services.task_notifications import (
             notify_responsibles_about_client_task,
         )
 
         notify_responsibles_about_client_task(task_id)
+
+    @action(detail=True, methods=["post"], url_path="move")
+    def move(self, request, pk=None):
+        """Drop a card into a column, right before `before` (or at the end)."""
+        task = self.get_object()
+        category = TaskCategory.objects.filter(
+            pk=request.data.get("category", task.category_id),
+            onboard_id=task.category.onboard_id,
+        ).first()
+
+        if category is None:
+            return Response(
+                {"detail": "Category not found in this onboard."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        before = request.data.get("before")
+        old_category_id = task.category_id
+
+        with transaction.atomic():
+            siblings = list(
+                Task.objects.select_for_update()
+                .filter(category=category)
+                .exclude(pk=task.pk)
+                .order_by("position", "id")
+            )
+            index = next(
+                (
+                    i
+                    for i, sibling in enumerate(siblings)
+                    if before is not None and str(sibling.pk) == str(before)
+                ),
+                len(siblings),
+            )
+            siblings.insert(index, task)
+
+            changed = []
+            for position, item in enumerate(siblings):
+                if item.pk != task.pk and item.position != position:
+                    item.position = position
+                    changed.append(item)
+            Task.objects.bulk_update(changed, ["position"])
+
+            task.category = category
+            task.position = index
+            task.save(update_fields=("category", "position", "updated_at"))
+
+            if old_category_id != category.pk:
+                record_task_event(
+                    task,
+                    request.user,
+                    TaskAuditLog.Action.UPDATED,
+                    description="Task updated.",
+                    metadata={"fields": ["category"]},
+                )
+
+        task = self.get_queryset().get(pk=task.pk)
+        return Response(self.get_serializer(task).data)
 
     @action(detail=True, methods=["post"], url_path="assign")
     def assign(self, request, pk=None):

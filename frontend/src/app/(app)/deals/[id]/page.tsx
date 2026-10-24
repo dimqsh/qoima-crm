@@ -1283,18 +1283,9 @@ function TasksTab({
             size="sm"
             onClick={() => openAdd()}
             disabled={ensureOnboard.isPending}
-            title={
-              isCollaborator
-                ? "Задача уйдёт на одобрение администратору"
-                : undefined
-            }
           >
             <Plus className="h-3.5 w-3.5" />
-            {ensureOnboard.isPending
-              ? "Готовим…"
-              : isCollaborator
-              ? "Предложить задачу"
-              : "Создать"}
+            {ensureOnboard.isPending ? "Готовим…" : "Создать"}
           </Button>
         </div>
       </div>
@@ -1304,23 +1295,17 @@ function TasksTab({
           <TasksBoard
             onboardId={effectiveOnboardId}
             categories={filterCategories(cats, filtered)}
-            readOnly={isCollaborator}
-            canAddCards={isCollaborator}
+            lockColumns={isCollaborator}
             onAddCard={(categoryId) => openAdd(categoryId)}
           />
         ) : (
           <EmptyBoardCTA
-            isCollaborator={isCollaborator}
             onCreate={() => openAdd()}
             pending={ensureOnboard.isPending}
           />
         )
       ) : (
-        <TasksList
-          tasks={filtered}
-          categories={cats}
-          readOnly={isCollaborator}
-        />
+        <TasksList tasks={filtered} categories={cats} />
       )}
 
       {pendingOnboardId && (
@@ -1337,11 +1322,9 @@ function TasksTab({
 }
 
 function EmptyBoardCTA({
-  isCollaborator,
   onCreate,
   pending,
 }: {
-  isCollaborator: boolean;
   onCreate: () => void;
   pending: boolean;
 }) {
@@ -1351,9 +1334,8 @@ function EmptyBoardCTA({
         Плана задач пока нет
       </h3>
       <p className="text-[14px] text-ink-3 mt-1 mb-5">
-        {isCollaborator
-          ? "Предложите первую задачу — она появится в плане после одобрения администратором."
-          : "Нажмите «Создать задачу» — онбординг и первая категория добавятся автоматически."}
+        Нажмите «Создать задачу» — онбординг и первая категория добавятся
+        автоматически.
       </p>
       <Button
         variant="primary"
@@ -1362,11 +1344,7 @@ function EmptyBoardCTA({
         disabled={pending}
       >
         <Plus className="h-3.5 w-3.5" />
-        {pending
-          ? "Готовим…"
-          : isCollaborator
-          ? "Предложить задачу"
-          : "Создать задачу"}
+        {pending ? "Готовим…" : "Создать задачу"}
       </Button>
     </Panel>
   );
@@ -1742,11 +1720,9 @@ function ApprovalFilter({
 function TasksList({
   tasks,
   categories,
-  readOnly,
 }: {
   tasks: OnboardTask[];
   categories: { id: number; name: string }[];
-  readOnly: boolean;
 }) {
   const catName = (id: number) =>
     categories.find((c) => c.id === id)?.name ?? "—";
@@ -1843,11 +1819,9 @@ function TasksList({
             <TR>
               <TD colSpan={8} className="text-center text-ink-4 py-12">
                 Задачи по фильтрам не найдены.
-                {!readOnly && (
-                  <span className="ml-1 text-accent hover:text-accent-ink cursor-pointer">
-                    Создать новую →
-                  </span>
-                )}
+                <span className="ml-1 text-accent hover:text-accent-ink cursor-pointer">
+                  Создать новую →
+                </span>
               </TD>
             </TR>
           )}

@@ -4,32 +4,49 @@
  * Trello-style tasks board.
  *
  * - Columns are TaskCategories of a given Onboard.
- * - Cards are OnboardTasks belonging to a category.
- * - Dragging a card to another column patches `task.category` on the backend.
+ * - Cards are OnboardTasks belonging to a category, kept in `position` order.
+ * - While dragging, the card is moved between columns locally so the target
+ *   column opens a gap exactly where it will land; on drop the backend gets
+ *   `{category, before}` and renumbers the column.
  * - The whole card is draggable (no separate handle). Tap/click without drag
  *   opens the detail modal.
- * - List-level actions: add a new column, rename, delete.
+ * - List-level actions: add a new column, rename, delete (unless locked).
  */
 
-import { useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   DndContext,
   DragOverlay,
-  PointerSensor,
   KeyboardSensor,
+  MeasuringStrategy,
+  PointerSensor,
+  closestCenter,
+  getFirstCollision,
+  pointerWithin,
+  rectIntersection,
   useDroppable,
   useSensor,
   useSensors,
-  pointerWithin,
-  rectIntersection,
-  type DragStartEvent,
-  type DragEndEvent,
   type CollisionDetection,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+  type UniqueIdentifier,
 } from "@dnd-kit/core";
 import {
   SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
@@ -56,38 +73,93 @@ import type { OnboardTask, TaskCategory } from "@/lib/types";
 interface TasksBoardProps {
   onboardId: number;
   categories: TaskCategory[];
+  /** No task changes at all — cards only open a read-only detail view. */
   readOnly?: boolean;
   /**
-   * When true, the "+ Add card" button is shown even in readOnly mode. Used
-   * for collaborators, who can propose new tasks (pending approval) but
-   * cannot edit categories or drag cards around.
+   * Columns can't be added, renamed or deleted. Used for clients, who manage
+   * tasks (create, edit, move, delete) but not the board structure.
    */
-  canAddCards?: boolean;
+  lockColumns?: boolean;
   /** Called when user clicks "+ Add card" on a column. */
   onAddCard: (categoryId: number) => void;
 }
 
-/**
- * Custom collision detection: prefer pointer-within (more forgiving for fast
- * cursor moves) and fall back to rect intersection. This is the recommended
- * pattern in dnd-kit docs for multi-column boards.
- */
-const customCollision: CollisionDetection = (args) => {
-  const pointerCollisions = pointerWithin(args);
-  if (pointerCollisions.length > 0) return pointerCollisions;
-  return rectIntersection(args);
-};
+/** Column id → ordered card ids, e.g. { "column-3": ["task-7", "task-9"] }. */
+type Columns = Record<string, string[]>;
+
+type CachedOnboard = {
+  categories?: TaskCategory[];
+  [k: string]: unknown;
+} | null;
+
+const columnKey = (id: number) => `column-${id}`;
+const cardKey = (id: number) => `task-${id}`;
+const idOf = (key: UniqueIdentifier) => Number(String(key).split("-")[1]);
+
+function columnsOf(categories: TaskCategory[]): Columns {
+  return Object.fromEntries(
+    categories.map((c) => [
+      columnKey(c.id),
+      (c.tasks ?? []).map((t) => cardKey(t.id)),
+    ])
+  );
+}
+
+function columnOf(cols: Columns, key: UniqueIdentifier) {
+  const k = String(key);
+  if (k in cols) return k;
+  return Object.keys(cols).find((col) => cols[col].includes(k));
+}
+
+/** Same move the backend does, applied to the cached onboard. */
+function moveInCache(
+  cur: CachedOnboard | undefined,
+  taskId: number,
+  categoryId: number,
+  before: number | null
+): CachedOnboard | undefined {
+  if (!cur?.categories) return cur;
+  let task: OnboardTask | undefined;
+  const stripped = cur.categories.map((c) => {
+    const found = (c.tasks ?? []).find((t) => t.id === taskId);
+    if (!found) return c;
+    task = found;
+    return { ...c, tasks: (c.tasks ?? []).filter((t) => t.id !== taskId) };
+  });
+  if (!task) return cur;
+  const moved = { ...task, category: categoryId };
+  return {
+    ...cur,
+    categories: stripped.map((c) => {
+      if (c.id !== categoryId) return c;
+      const list = [...(c.tasks ?? [])];
+      const at = before == null ? -1 : list.findIndex((t) => t.id === before);
+      list.splice(at < 0 ? list.length : at, 0, moved);
+      return { ...c, tasks: list };
+    }),
+  };
+}
+
+const emptyUnsubscribe = () => () => {};
+const trueSnapshot = () => true;
+const falseSnapshot = () => false;
+
+function useMounted() {
+  return useSyncExternalStore(emptyUnsubscribe, trueSnapshot, falseSnapshot);
+}
 
 export function TasksBoard({
   onboardId,
   categories,
   readOnly,
-  canAddCards,
+  lockColumns,
   onAddCard,
 }: TasksBoardProps) {
   const qc = useQueryClient();
+  const mounted = useMounted();
   const [activeTask, setActiveTask] = useState<OnboardTask | null>(null);
   const [detailTask, setDetailTask] = useState<OnboardTask | null>(null);
+  const columnsLocked = readOnly || lockColumns;
 
   // Pointer sensor with small activation distance — short clicks open the
   // detail modal, longer drags move the card.
@@ -95,67 +167,41 @@ export function TasksBoard({
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
     }),
-    useSensor(KeyboardSensor)
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
   );
 
-  type CachedOnboard = {
-    categories?: TaskCategory[];
-    [k: string]: unknown;
-  } | null;
   const onboardKey = ["onboard", onboardId];
 
-  function findCategoryByTaskId(catList: TaskCategory[], taskId: number) {
-    for (const c of catList) {
-      if ((c.tasks ?? []).some((t) => t.id === taskId)) return c;
+  const baseColumns = useMemo(() => columnsOf(categories), [categories]);
+  // Local copy of the layout while a card is in the air; null otherwise.
+  const [dragColumns, setDragColumns] = useState<Columns | null>(null);
+  const columns = dragColumns ?? baseColumns;
+  const [originColumn, setOriginColumn] = useState<string | undefined>();
+
+  const taskByKey = useMemo(() => {
+    const map = new Map<string, OnboardTask>();
+    for (const c of categories) {
+      for (const t of c.tasks ?? []) map.set(cardKey(t.id), t);
     }
-    return null;
-  }
+    return map;
+  }, [categories]);
 
   const moveTask = useMutation({
     mutationFn: ({
       taskId,
-      newCategoryId,
+      categoryId,
+      before,
     }: {
       taskId: number;
-      newCategoryId: number;
-    }) => onboards.updateTask(taskId, { category: newCategoryId }),
-    onMutate: async ({ taskId, newCategoryId }) => {
-      await qc.cancelQueries({ queryKey: onboardKey });
-      const snapshot = qc.getQueryData<CachedOnboard>(onboardKey);
-      qc.setQueryData<CachedOnboard>(onboardKey, (cur) => {
-        if (!cur?.categories) return cur;
-        const cats = cur.categories;
-        const fromCat = findCategoryByTaskId(cats, taskId);
-        if (!fromCat || fromCat.id === newCategoryId) return cur;
-        const task = (fromCat.tasks ?? []).find((t) => t.id === taskId);
-        if (!task) return cur;
-        return {
-          ...cur,
-          categories: cats.map((c) => {
-            if (c.id === fromCat.id) {
-              return {
-                ...c,
-                tasks: (c.tasks ?? []).filter((t) => t.id !== taskId),
-              };
-            }
-            if (c.id === newCategoryId) {
-              return {
-                ...c,
-                tasks: [
-                  ...(c.tasks ?? []),
-                  { ...task, category: newCategoryId },
-                ],
-              };
-            }
-            return c;
-          }),
-        };
-      });
-      return { snapshot };
-    },
-    onError: (err, _vars, ctx) => {
-      if (ctx?.snapshot !== undefined) {
-        qc.setQueryData(onboardKey, ctx.snapshot);
+      categoryId: number;
+      before: number | null;
+      snapshot: CachedOnboard | undefined;
+    }) => onboards.moveTask(taskId, { category: categoryId, before }),
+    onError: (err, vars) => {
+      if (vars.snapshot !== undefined) {
+        qc.setQueryData(onboardKey, vars.snapshot);
       }
       toast.error(asApiError(err).message);
     },
@@ -165,41 +211,125 @@ export function TasksBoard({
     },
   });
 
-  function handleDragStart(e: DragStartEvent) {
-    const id = String(e.active.id);
-    if (!id.startsWith("task-")) return;
-    const taskId = Number(id.slice("task-".length));
-    const cat = findCategoryByTaskId(categories, taskId);
-    const task = cat?.tasks?.find((t) => t.id === taskId);
-    if (task) setActiveTask(task);
+  // Multi-column collision detection (dnd-kit "multiple containers" recipe):
+  // when the pointer is over a column, snap to the closest card inside it so
+  // the gap opens between cards rather than always at the end.
+  const lastOverId = useRef<UniqueIdentifier | null>(null);
+  const movedToNewColumn = useRef(false);
+
+  const collisionDetection: CollisionDetection = useCallback(
+    (args) => {
+      const pointerHits = pointerWithin(args);
+      const hits = pointerHits.length > 0 ? pointerHits : rectIntersection(args);
+      let overId = getFirstCollision(hits, "id");
+
+      if (overId != null) {
+        const inColumn = columns[String(overId)];
+        if (inColumn && inColumn.length > 0) {
+          overId =
+            closestCenter({
+              ...args,
+              droppableContainers: args.droppableContainers.filter(
+                (c) => c.id !== overId && inColumn.includes(String(c.id))
+              ),
+            })[0]?.id ?? overId;
+        }
+        lastOverId.current = overId;
+        return [{ id: overId }];
+      }
+
+      // Layout is shifting right after a column switch — keep the last target.
+      if (movedToNewColumn.current) lastOverId.current = args.active.id;
+      return lastOverId.current ? [{ id: lastOverId.current }] : [];
+    },
+    [columns]
+  );
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      movedToNewColumn.current = false;
+    });
+  }, [dragColumns]);
+
+  function resetDrag() {
+    setActiveTask(null);
+    setDragColumns(null);
+    setOriginColumn(undefined);
+    lastOverId.current = null;
   }
 
-  function handleDragEnd(e: DragEndEvent) {
-    setActiveTask(null);
-    const { active, over } = e;
-    if (!over) return;
+  function handleDragStart({ active }: DragStartEvent) {
+    const task = taskByKey.get(String(active.id));
+    if (!task) return;
+    setActiveTask(task);
+    setDragColumns(baseColumns);
+    setOriginColumn(columnOf(baseColumns, active.id));
+  }
 
-    const activeId = String(active.id);
-    if (!activeId.startsWith("task-")) return;
-    const taskId = Number(activeId.slice("task-".length));
+  function handleDragOver({ active, over }: DragOverEvent) {
+    if (!over || !dragColumns) return;
+    const from = columnOf(dragColumns, active.id);
+    const to = columnOf(dragColumns, over.id);
+    if (!from || !to || from === to) return;
 
-    const overId = String(over.id);
-    let newCategoryId: number | null = null;
-    if (overId.startsWith("column-")) {
-      newCategoryId = Number(overId.slice("column-".length));
-    } else if (overId.startsWith("task-")) {
-      const overCat = findCategoryByTaskId(
-        categories,
-        Number(overId.slice("task-".length))
-      );
-      if (overCat) newCategoryId = overCat.id;
+    const activeKey = String(active.id);
+    const target = dragColumns[to];
+    const overIndex = target.indexOf(String(over.id));
+    let index = target.length;
+    if (overIndex >= 0) {
+      const dragged = active.rect.current.translated;
+      const below =
+        dragged && dragged.top > over.rect.top + over.rect.height / 2;
+      index = overIndex + (below ? 1 : 0);
     }
-    if (newCategoryId == null) return;
 
-    const fromCat = findCategoryByTaskId(categories, taskId);
-    if (!fromCat || fromCat.id === newCategoryId) return;
+    movedToNewColumn.current = true;
+    setDragColumns({
+      ...dragColumns,
+      [from]: dragColumns[from].filter((k) => k !== activeKey),
+      [to]: [...target.slice(0, index), activeKey, ...target.slice(index)],
+    });
+  }
 
-    moveTask.mutate({ taskId, newCategoryId });
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    const cols = dragColumns;
+    const origin = originColumn;
+    const activeKey = String(active.id);
+    const column = cols ? columnOf(cols, activeKey) : undefined;
+
+    if (!over || !cols || !origin || !column) {
+      resetDrag();
+      return;
+    }
+
+    let order = cols[column];
+    if (columnOf(cols, over.id) === column) {
+      const from = order.indexOf(activeKey);
+      const to = order.indexOf(String(over.id));
+      if (to >= 0 && from !== to) order = arrayMove(order, from, to);
+    }
+
+    const beforeKey = order[order.indexOf(activeKey) + 1] ?? null;
+    const original = baseColumns[origin];
+    const originalBefore = original[original.indexOf(activeKey) + 1] ?? null;
+    if (column === origin && beforeKey === originalBefore) {
+      resetDrag();
+      return;
+    }
+
+    const taskId = idOf(activeKey);
+    const categoryId = idOf(column);
+    const before = beforeKey ? idOf(beforeKey) : null;
+
+    // Apply the move to the cache before the drag state is dropped, so the
+    // card stays where it was released instead of flashing back.
+    qc.cancelQueries({ queryKey: onboardKey });
+    const snapshot = qc.getQueryData<CachedOnboard>(onboardKey);
+    qc.setQueryData<CachedOnboard>(onboardKey, (cur) =>
+      moveInCache(cur, taskId, categoryId, before)
+    );
+    resetDrag();
+    moveTask.mutate({ taskId, categoryId, before, snapshot });
   }
 
   return (
@@ -207,32 +337,51 @@ export function TasksBoard({
       <div className="overflow-x-auto scrollbar-thin -mx-2 px-2 pb-3">
         <DndContext
           sensors={sensors}
-          collisionDetection={customCollision}
+          collisionDetection={collisionDetection}
+          measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
           onDragStart={handleDragStart}
+          onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
-          onDragCancel={() => setActiveTask(null)}
+          onDragCancel={resetDrag}
         >
           <div className="flex items-start gap-3 min-w-fit">
-            {categories.map((c) => (
-              <CategoryColumn
-                key={c.id}
-                category={c}
-                readOnly={readOnly}
-                canAddCards={canAddCards}
-                onAddCard={onAddCard}
-                onOpenTask={(t) => setDetailTask(t)}
-              />
-            ))}
-            {!readOnly && <AddColumn onboardId={onboardId} />}
+            {categories.map((c) => {
+              const key = columnKey(c.id);
+              const cards = (columns[key] ?? [])
+                .map((k) => taskByKey.get(k))
+                .filter((t): t is OnboardTask => !!t);
+              return (
+                <CategoryColumn
+                  key={c.id}
+                  category={c}
+                  cards={cards}
+                  isDropTarget={
+                    !!activeTask &&
+                    key !== originColumn &&
+                    cards.some((t) => t.id === activeTask.id)
+                  }
+                  readOnly={readOnly}
+                  columnsLocked={columnsLocked}
+                  onAddCard={onAddCard}
+                  onOpenTask={(t) => setDetailTask(t)}
+                />
+              );
+            })}
+            {!columnsLocked && <AddColumn onboardId={onboardId} />}
           </div>
 
-          <DragOverlay zIndex={1000}>
-            {activeTask ? (
-              <div className="rotate-3 shadow-pop">
-                <TaskCardVisual t={activeTask} />
-              </div>
-            ) : null}
-          </DragOverlay>
+          {/* Portaled so transformed/animated ancestors can't offset it. */}
+          {mounted &&
+            createPortal(
+              <DragOverlay zIndex={1000}>
+                {activeTask ? (
+                  <div className="rotate-2 shadow-pop rounded-md cursor-grabbing">
+                    <TaskCardVisual t={activeTask} />
+                  </div>
+                ) : null}
+              </DragOverlay>,
+              document.body
+            )}
         </DndContext>
       </div>
 
@@ -254,20 +403,25 @@ export function TasksBoard({
 
 function CategoryColumn({
   category,
+  cards,
+  isDropTarget,
   readOnly,
-  canAddCards,
+  columnsLocked,
   onAddCard,
   onOpenTask,
 }: {
   category: TaskCategory;
+  cards: OnboardTask[];
+  isDropTarget: boolean;
   readOnly?: boolean;
-  canAddCards?: boolean;
+  columnsLocked?: boolean;
   onAddCard: (categoryId: number) => void;
   onOpenTask: (task: OnboardTask) => void;
 }) {
   const qc = useQueryClient();
-  const tasks = useMemo(() => category.tasks ?? [], [category.tasks]);
-  const taskIds = useMemo(() => tasks.map((t) => `task-${t.id}`), [tasks]);
+  const cardIds = useMemo(() => cards.map((t) => cardKey(t.id)), [cards]);
+  // The whole column (header and footer included) accepts drops.
+  const { setNodeRef } = useDroppable({ id: columnKey(category.id) });
 
   const [renaming, setRenaming] = useState(false);
   const [draftName, setDraftName] = useState(category.name);
@@ -297,7 +451,13 @@ function CategoryColumn({
   });
 
   return (
-    <div className="bg-surface-2 border border-hairline rounded-xl flex flex-col w-[280px] sm:w-[300px] shrink-0 max-h-[calc(100dvh-180px)] md:max-h-[calc(100vh-280px)]">
+    <div
+      ref={setNodeRef}
+      className={cn(
+        "bg-surface-2 border border-hairline rounded-xl flex flex-col w-[280px] sm:w-[300px] shrink-0 max-h-[calc(100dvh-180px)] md:max-h-[calc(100vh-280px)] transition-colors",
+        isDropTarget && "border-accent/50 bg-accent-soft/30"
+      )}
+    >
       {/* Column header */}
       <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-2">
         {renaming ? (
@@ -336,26 +496,26 @@ function CategoryColumn({
         ) : (
           <button
             type="button"
-            disabled={readOnly}
-            onClick={() => !readOnly && setRenaming(true)}
+            disabled={columnsLocked}
+            onClick={() => !columnsLocked && setRenaming(true)}
             className="flex items-center gap-2 flex-1 text-left h-7 min-w-0"
-            title={readOnly ? undefined : "Переименовать"}
+            title={columnsLocked ? undefined : "Переименовать"}
           >
             <span className="text-[14px] font-semibold text-ink truncate">
               {category.name}
             </span>
             <span className="text-[12px] text-ink-3 tabular-nums">
-              {tasks.length}
+              {cards.length}
             </span>
           </button>
         )}
-        {!readOnly && !renaming && (
+        {!columnsLocked && !renaming && (
           <button
             type="button"
             onClick={() => {
               const msg =
-                tasks.length > 0
-                  ? `Удалить категорию «${category.name}» и ${tasks.length} задач(и) внутри?`
+                cards.length > 0
+                  ? `Удалить категорию «${category.name}» и ${cards.length} задач(и) внутри?`
                   : `Удалить категорию «${category.name}»?`;
               if (confirm(msg)) remove.mutate();
             }}
@@ -370,63 +530,38 @@ function CategoryColumn({
 
       {/* Cards (sortable inside the column) */}
       <SortableContext
-        id={`column-${category.id}`}
-        items={taskIds}
+        id={columnKey(category.id)}
+        items={cardIds}
         strategy={verticalListSortingStrategy}
       >
-        <ColumnDroppable id={`column-${category.id}`}>
-          <div className="px-2 pb-2 flex flex-col gap-2 flex-1 overflow-y-auto scrollbar-thin">
-            {tasks.length === 0 && (
-              <div className="text-[13px] text-ink-4 text-center py-8 px-3 border border-dashed border-hairline rounded-md">
-                Перетащите задачу сюда
-              </div>
-            )}
-            {tasks.map((t) => (
-              <SortableTaskCard
-                key={t.id}
-                t={t}
-                readOnly={readOnly}
-                onOpen={() => onOpenTask(t)}
-              />
-            ))}
-          </div>
-        </ColumnDroppable>
+        <div className="px-2 pb-2 flex flex-col gap-2 flex-1 min-h-[60px] overflow-y-auto scrollbar-thin">
+          {cards.length === 0 && (
+            <div className="text-[13px] text-ink-4 text-center py-8 px-3 border border-dashed border-hairline rounded-md">
+              Перетащите задачу сюда
+            </div>
+          )}
+          {cards.map((t) => (
+            <SortableTaskCard
+              key={t.id}
+              t={t}
+              readOnly={readOnly}
+              onOpen={() => onOpenTask(t)}
+            />
+          ))}
+        </div>
       </SortableContext>
 
       {/* Footer — Add card */}
-      {(!readOnly || canAddCards) && (
+      {!readOnly && (
         <button
           type="button"
           onClick={() => onAddCard(category.id)}
           className="flex items-center gap-2 px-3 py-2.5 text-[13px] text-ink-3 hover:text-ink hover:bg-surface-3 transition-colors rounded-b-xl border-t border-hairline"
         >
           <Plus className="h-3.5 w-3.5" />
-          {readOnly ? "Предложить задачу" : "Добавить карточку"}
+          Добавить карточку
         </button>
       )}
-    </div>
-  );
-}
-
-/* ---------------------- Droppable wrapper ---------------------- */
-
-function ColumnDroppable({
-  id,
-  children,
-}: {
-  id: string;
-  children: React.ReactNode;
-}) {
-  const { setNodeRef, isOver } = useDroppable({ id });
-  return (
-    <div
-      ref={setNodeRef}
-      className={cn(
-        "flex-1 min-h-[60px] transition-colors rounded-md",
-        isOver && "bg-accent-soft/40"
-      )}
-    >
-      {children}
     </div>
   );
 }
@@ -532,14 +667,15 @@ function SortableTaskCard({
     transition,
     isDragging,
   } = useSortable({
-    id: `task-${t.id}`,
+    id: cardKey(t.id),
     disabled: readOnly,
   });
 
+  // Translate (not Transform): cards have different heights, and a scale
+  // component would squash neighbours while they shift.
   const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
+    transform: CSS.Translate.toString(transform),
     transition,
-    opacity: isDragging ? 0 : 1,
   };
 
   return (
@@ -553,7 +689,9 @@ function SortableTaskCard({
         onOpen();
       }}
       className={cn(
-        "touch-none select-none",
+        "touch-none select-none rounded-md",
+        // The card's slot stays visible as a drop placeholder.
+        isDragging && "opacity-40 outline-2 outline-dashed outline-accent/60",
         readOnly ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"
       )}
     >

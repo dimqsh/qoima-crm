@@ -133,21 +133,15 @@ function TaskDetailInner({
         is_active: status !== "done" && status !== "cancelled",
       });
     },
-    onSuccess: (updated) => {
+    onSuccess: () => {
       invalidateTask();
-      if (updated?.approval_status === "pending" && updated?.approval_action === "cancel") {
-        toast.success("Запрос на отмену отправлен администратору.");
-      } else {
-        toast.success("Задача обновлена.");
-      }
+      toast.success("Задача обновлена.");
       onOpenChange(false);
     },
     onError: (err) => toast.error(asApiError(err).message),
   });
 
-  // Hard delete (or 202 pending-cancel for collaborators) — the API returns
-  // the same shape either way, the backend just chooses based on the actor's
-  // role and approval rules.
+  // The backend soft-deletes: the task is marked cancelled and kept for audit.
   const remove = useMutation({
     mutationFn: () => {
       if (!task) throw new Error("no task");
@@ -155,9 +149,7 @@ function TaskDetailInner({
     },
     onSuccess: () => {
       invalidateTask();
-      toast.success(
-        "Запрос на удаление отправлен — задача будет удалена после одобрения."
-      );
+      toast.success("Задача удалена.");
       onOpenChange(false);
     },
     onError: (err) => toast.error(asApiError(err).message),
@@ -169,8 +161,6 @@ function TaskDetailInner({
   const priority = resolvePriority(task);
   const currentCat = categories.find((c) => c.id === categoryId);
   const chip = approvalChip(task);
-  const isAwaitingCancel =
-    task.approval_status === "pending" && task.approval_action === "cancel";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -364,17 +354,13 @@ function TaskDetailInner({
             <button
               type="button"
               onClick={() => {
-                const prompt = isAwaitingCancel
-                  ? "Запрос на отмену уже ожидает решения. Отправить повторно?"
-                  : "Запрос на удаление уйдёт администратору. Продолжить?";
-                if (confirm(prompt)) remove.mutate();
+                if (confirm(`Удалить задачу «${task.name}»?`)) remove.mutate();
               }}
               disabled={remove.isPending}
               className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded text-[13px] text-ink-3 hover:text-danger hover:bg-tag-red-bg/30 transition-colors"
-              title="Удаление подтверждается администратором в Telegram"
             >
               <Trash2 className="h-3.5 w-3.5" />
-              {isAwaitingCancel ? "Повторить запрос" : "Запросить удаление"}
+              Удалить задачу
             </button>
           ) : (
             <span />
