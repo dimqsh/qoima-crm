@@ -79,6 +79,14 @@ jobs:
             echo "PRODUCTION_ENV_FILE secret is empty; keeping existing server .env."
           fi
 
+      - name: Register public domains in server env
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" $SSH_OPTS \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '${DEPLOY_PATH}' && \
+             test -f .env && \
+             sh deploy/ensure-env-domains.sh .env"
+
       - name: Initialize HTTPS certificate
         run: |
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" $SSH_OPTS \
