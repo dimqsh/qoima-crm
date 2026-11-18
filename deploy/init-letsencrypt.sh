@@ -12,8 +12,8 @@ set +a
 
 # DOMAIN is the certificate name (nginx reads /etc/letsencrypt/live/$DOMAIN).
 # CERT_DOMAINS are all names the certificate must cover.
-DOMAIN="${DOMAIN:-crm.qoima.com.kz}"
-CERT_DOMAINS="${CERT_DOMAINS:-crm.qoima.com.kz crm.si-automation.kz}"
+DOMAIN="${DOMAIN:-crm.si-automation.kz}"
+CERT_DOMAINS="${CERT_DOMAINS:-crm.si-automation.kz}"
 EMAIL="${CERTBOT_EMAIL:-${DJANGO_SUPERUSER_EMAIL:-}}"
 STAGING="${CERTBOT_STAGING:-0}"
 RSA_KEY_SIZE="${CERTBOT_RSA_KEY_SIZE:-4096}"

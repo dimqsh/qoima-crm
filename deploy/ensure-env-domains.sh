@@ -4,7 +4,7 @@
 set -eu
 
 ENV_FILE="${1:-.env}"
-DOMAINS="${DOMAINS:-crm.qoima.com.kz crm.si-automation.kz}"
+DOMAINS="${DOMAINS:-crm.si-automation.kz}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "Missing $ENV_FILE" >&2

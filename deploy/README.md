@@ -79,20 +79,19 @@ docker compose --env-file .env up -d --build
 
 ## HTTPS Setup
 
-The app is served on `crm.qoima.com.kz` and `crm.si-automation.kz`. Their DNS
-A records must point to `185.22.67.18`, and ports `80` and `443` must be open
-on the server.
+The production domain is `crm.si-automation.kz` (it replaced
+`crm.qoima.com.kz`, which no longer resolves). Its DNS A record must point to
+`185.22.67.18`, and ports `80` and `443` must be open on the server.
 
-Both names share one Let's Encrypt certificate stored as `crm.qoima.com.kz`.
-To add another domain, put it in:
+The certificate is stored as `crm.si-automation.kz`. To add another domain,
+put it in:
 
 - `server_name` in `nginx/default.conf` (both server blocks)
 - `CERT_DOMAINS` in `deploy/init-letsencrypt.sh`
 - `DOMAINS` in `deploy/ensure-env-domains.sh`
 
-The deploy workflow then adds it to `DJANGO_ALLOWED_HOSTS`,
-`CSRF_TRUSTED_ORIGINS` and `CORS_ALLOWED_ORIGINS` in the server `.env` and
-expands the certificate.
+The deploy workflow adds it to `DJANGO_ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`
+and `CORS_ALLOWED_ORIGINS` in the server `.env` and expands the certificate.
 
 On the first deployment, issue the Let's Encrypt certificate:
 
@@ -119,13 +118,13 @@ Renew certificates periodically with:
 The production Telegram webhook endpoint is:
 
 ```text
-https://crm.qoima.com.kz/api/telegram/webhook/
+https://crm.si-automation.kz/api/telegram/webhook/
 ```
 
 Set this value in `.env`:
 
 ```text
-TELEGRAM_WEBHOOK_URL=https://crm.qoima.com.kz/api/telegram/webhook/
+TELEGRAM_WEBHOOK_URL=https://crm.si-automation.kz/api/telegram/webhook/
 ```
 
 Register or refresh the Telegram webhook with:
